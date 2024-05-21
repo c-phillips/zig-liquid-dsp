@@ -784,7 +784,7 @@ pub fn build(b: *std.Build) !void {
         .target = target,
         .optimize = mode,
     });
-
+    liquid_ar.pie = true;
     liquid_ar.linkLibC();
     liquid_ar.addIncludePath(includes);
 
@@ -808,29 +808,30 @@ pub fn build(b: *std.Build) !void {
     }
 
     const liquid_ar_install_step = b.addInstallArtifact(liquid_ar, .{});
+    const arlib_step = b.step("static-lib", "Build static libliquid");
+    arlib_step.dependOn(&liquid_ar_install_step.step);
     if( LBO.verbose_build ) std.log.debug("\t\tCreated builder for libliquid archive", .{});
 
 
 
     if( LBO.verbose_build ) std.log.debug("Building shared library...", .{});
     const liquid_sh = b.addSharedLibrary(.{
-        .name = "liquid",
+        .name = "libliquid",
         .target = target,
         .optimize = mode,
     });
 
     // Trying to find a set of parameters that will avoid the windows issue...
-    liquid_sh.linker_allow_shlib_undefined = true;
-    liquid_sh.bundle_compiler_rt = true;   
-    liquid_sh.link_function_sections = false;
-    liquid_sh.link_gc_sections = false;
-    liquid_sh.dll_export_fns = true;
+    if(target.result.os.tag == .windows){
+        liquid_sh.dll_export_fns = true;
+    }
+    liquid_sh.installHeader(b.path("include/liquid.h"), "liquid/liquid.h");
     
     liquid_sh.linkLibC();
     liquid_sh.addIncludePath(includes);
     const SH_CFLAGS = try std.mem.concat(
         b.allocator, 
-        []const u8, &.{CFLAGS, &.{"-fPIC", "-fwhole-program"}}
+        []const u8, &.{CFLAGS, &.{"-fwhole-program"}}
     );
     liquid_sh.addCSourceFiles(.{
         .root = b.path("src"),
@@ -851,8 +852,7 @@ pub fn build(b: *std.Build) !void {
     if( LBO.verbose_build ) std.log.debug("\t\tCreated builder for libliquid shared", .{});
 
 
-    const lib_step = b.step("lib", "Build libliquid");
-    lib_step.dependOn(&liquid_ar_install_step.step);
+    const lib_step = b.step("shared-lib", "Build shared libliquid");
     lib_step.dependOn(&liquid_sh_install_step.step);
 
 
@@ -865,7 +865,6 @@ pub fn build(b: *std.Build) !void {
     if( example_files == null ) return error.NoExamples;
 
     const example_step = b.step("example-all", "Build the example programs");
-    example_step.dependOn(lib_step);
 
     try std.fs.cwd().makePath("zig-out/examples");
 
@@ -891,7 +890,6 @@ pub fn build(b: *std.Build) !void {
             .target = target,
             .optimize = mode,
         });
-        example_exe.step.dependOn(lib_step);
 
         example_exe.linkLibC();
         example_exe.addIncludePath(includes);
@@ -902,6 +900,7 @@ pub fn build(b: *std.Build) !void {
         });
 
         if( LBO.link_shared ){
+            example_exe.step.dependOn(lib_step);
             // Colocate the dynamic library with the examples
             const copy_lib = b.addInstallFile(
                 b.path("./zig-out/lib/liquid.lib"),
@@ -916,6 +915,7 @@ pub fn build(b: *std.Build) !void {
             example_exe.addLibraryPath(b.path("./zig-out/lib/"));
             example_exe.linkSystemLibrary("liquid");
         } else {
+            example_exe.step.dependOn(arlib_step);
             example_exe.addObjectFile(b.path("./zig-out/lib/libliquid.lib"));
         }
 
@@ -940,7 +940,11 @@ pub fn build(b: *std.Build) !void {
     //      Build and run the tests
     // ************************************************************************
     const test_step = b.step("test-all", "Build and run all tests");
-    test_step.dependOn(lib_step);
+    if(LBO.link_shared){
+        test_step.dependOn(lib_step);
+    } else {
+        test_step.dependOn(arlib_step);
+    }
 
     if( LBO.verbose_build ) std.log.debug("Generating module test steps", .{});
     for(modules.items) |module| {
@@ -954,7 +958,11 @@ pub fn build(b: *std.Build) !void {
             for(test_builders.items) |test_builder| {
                 if( LBO.verbose_build ) std.log.debug("\t\t + Test: {s}", .{test_builder.name});
 
-                test_builder.step.dependOn(lib_step);
+                if(LBO.link_shared){
+                    test_builder.step.dependOn(lib_step);
+                } else {
+                    test_builder.step.dependOn(arlib_step);
+                }
 
                 const run_test_cmd = b.addRunArtifact(test_builder);
                 module_test_step.dependOn(&run_test_cmd.step);
